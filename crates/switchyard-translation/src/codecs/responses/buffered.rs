@@ -161,7 +161,10 @@ impl FormatCodec for OpenAiResponsesCodec {
             body.insert("max_output_tokens".to_string(), json!(max_output_tokens));
         }
         if let Some(response_format) = &request.output.response_format {
-            body.insert("text".to_string(), json!({"format": response_format}));
+            body.insert(
+                "text".to_string(),
+                json!({"format": encode_responses_text_format(response_format)}),
+            );
         }
         if let Some(effort) = &request.reasoning.effort {
             body.insert("reasoning".to_string(), json!({"effort": effort}));
@@ -582,6 +585,7 @@ fn decode_responses_reasoning_item(item: &Map<String, Value>) -> Vec<ContentBloc
     vec![ContentBlock::Reasoning {
         text: parts.join("\n"),
         signature: None,
+        details: Vec::new(),
     }]
 }
 
@@ -646,6 +650,7 @@ fn decode_responses_content(value: &Value) -> Vec<ContentBlock> {
                                 .unwrap_or_default()
                                 .to_string(),
                             signature: None,
+                            details: Vec::new(),
                         });
                     }
                     Some("input_image") => {
@@ -855,6 +860,43 @@ fn decode_responses_text_format(value: Option<&Value>) -> Option<Value> {
     }
 }
 
+// Flattens Chat-compatible JSON schema fields into the Responses text format shape.
+fn encode_responses_text_format(response_format: &Value) -> Value {
+    let Some(format) = response_format.as_object() else {
+        return response_format.clone();
+    };
+    let Some(response_type) = format
+        .get("type")
+        .filter(|value| value.as_str() == Some("json_schema"))
+    else {
+        return response_format.clone();
+    };
+
+    let Some(Value::Object(json_schema)) = format.get("json_schema") else {
+        return response_format.clone();
+    };
+    if !matches!(json_schema.get("name"), Some(Value::String(_)))
+        || !matches!(json_schema.get("schema"), Some(Value::Object(_)))
+        || json_schema
+            .get("description")
+            .is_some_and(|value| !value.is_string())
+        || json_schema
+            .get("strict")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return response_format.clone();
+    }
+
+    let mut output = Map::new();
+    output.insert("type".to_string(), response_type.clone());
+    for field in ["name", "description", "schema", "strict"] {
+        if let Some(value) = json_schema.get(field) {
+            output.insert(field.to_string(), value.clone());
+        }
+    }
+    Value::Object(output)
+}
+
 // Encodes normalized messages into the Responses `input` shape.
 fn encode_responses_input(
     messages: &[Message],
@@ -926,6 +968,7 @@ fn encode_responses_special_input(block: &ContentBlock) -> Option<Value> {
         ContentBlock::Reasoning {
             text,
             signature: None,
+            ..
         } => Some(json!({
             "type": "reasoning",
             "content": [{"type": "reasoning_text", "text": text}],
